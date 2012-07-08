@@ -1,70 +1,172 @@
 package main
 
 import (
+  "flag"
+  "fmt"
   "regexp"
   "os"
+  "path"
+  //"syscall"
   "io/ioutil"
+  "log"
 )
 
-func main() {
-  var re *regexp.Regexp
-  var b []byte
-  var out *os.File
-  var replacement []byte
-  var err error
-  var infile *string
-  inplace := false
+const BAD_ARGS = 255
+const INPUT_ERR = 1
+const OUTPUT_ERR = 2
+const BAD_INPLACE_FLAG = 3
 
-  args := os.Args[0:]
+const MAX_INT = int(^uint(0) >> 1)
 
-  out = os.Stdout
+type NullWriter struct {}
+func (w *NullWriter) Write(data []byte) (int, error) { return len(data), nil }
 
-  if len(args) > 1 && args[1] == "-i" {
-    inplace = true
-    args = args[1:]
+type read_file func() ([]byte, error)
+
+func print_help() {
+  program := path.Base(os.Args[0])
+  fmt.Fprintf(os.Stderr, "Usage: %s [-d] [-i|-I] <regex> [replacement] [file file file]\n", program)
+  fmt.Fprintf(os.Stderr, "       %s --help\n", program)
+  flag.PrintDefaults()
+  os.Exit(BAD_ARGS)
+}
+
+func fail(msg string, code int) {
+  os.Stderr.WriteString(msg + "\n")
+  os.Exit(code)
+}
+
+func handle_file_error(err error, file string, msg string, code int) {
+  if err != nil {
+    fail(msg + ": " + file, code)
   }
+}
 
-  re= regexp.MustCompile(args[1])
- 
-  if len(args) > 3 {
-    replacement = []byte(args[2])
-    infile = &args[3]
-    b, _ = ioutil.ReadFile(*infile)
-  } else if len(args) > 2 {
-    infile = &args[2]
-    b, err = ioutil.ReadFile(*infile)
+func is_file(file string) bool {
+  isfile := false
+  info, err := os.Stat(file)
+  if err != nil {
     if os.IsNotExist(err) {
-      infile = nil
-      // file does not exist, treat arg #2 as a replacement string
-      // use Stdin as input
-      replacement = []byte(args[2])
-      b, _ = ioutil.ReadAll(os.Stdin)
+      log.Print("No such file: " + file)
+    } else {
+      log.Print(err.Error())
     }
+  } else if info.IsDir() {
+    log.Print(file + " is not a file")
   } else {
-    b, _ = ioutil.ReadAll(os.Stdin)
+    isfile = true
   }
+  return isfile
+}
 
-  if infile != nil && inplace {
-    os.Stderr.Write([]byte("Setting out to " + *infile + "\n"))
-    out, err = os.OpenFile(*infile, os.O_WRONLY, 644)
-    if (err != nil) {
-      os.Stderr.Write([]byte("Error setting outputfile"))
+func parse_file_args(args []string) (replacement *string, files []string) {
+  replacement = nil
+  files = args
+  if len(args) > 0 {
+    if !is_file(args[0]) {
+      replacement = &args[0]
+      log.Printf("Interpreting '%s' as replacement string", *replacement)
+      files = args[1:]
     }
   }
+  return
+}
 
-  os.Stderr.Write([]byte(args[1]))
-  if replacement != nil {
-    os.Stderr.Write([]byte("WRITING REPLACEMENT " + string(replacement) + "\n"))
-    os.Stderr.Write(b)
-    os.Stderr.Write(re.ReplaceAll(b, replacement))
-    out.Write(re.ReplaceAll(b, replacement))
+func replace(re *regexp.Regexp, input []byte, replacement *string, inplace bool, file string, with_filename bool, out *os.File) *os.File {
+  log.Printf("Processing input file: %s", file)
+  if (inplace) {
+    if (os.Stdin.Name() == file) {
+      os.Stderr.WriteString("Warning: not replacing Stdin in-place\n")
+    } else {
+      var err error
+      out, err = os.OpenFile(file, os.O_WRONLY, 644)
+      handle_file_error(err, "Error opening output file", file, OUTPUT_ERR)
+    }
+  }
+  replaced := re.ReplaceAll(input, []byte(*replacement))
+  if with_filename {
+    out.WriteString(file + ": ")
+  }
+  out.Write(replaced)
+  out.WriteString("\n")
+  return out
+}
+
+func find(re *regexp.Regexp, input []byte, file string, with_filename bool, out *os.File) {
+  result := re.FindAll(input, MAX_INT)
+  for _, match := range result {
+    if with_filename {
+      out.WriteString(file + ": ")
+    }
+    out.Write(match)
+    out.WriteString("\n")
+  }
+}
+
+func grope(re *regexp.Regexp, replacement *string, inplace bool, file string, with_filename bool, reader read_file) {
+  input, err := reader()
+  handle_file_error(err, "Error reading file", file, INPUT_ERR)
+
+  out := os.Stdout
+  if (replacement != nil) {
+    out = replace(re, input, replacement, inplace, file, with_filename, out)
   } else {
-    result := re.FindAll(b, 100)
-    for _, match := range result {
-      os.Stderr.Write([]byte("Writing match " + string(match)))
-      out.Write(match)
-      out.Write([]byte("\n"))
-    }
+    find(re, input, file, with_filename, out)
   }
   out.Sync()
+  if (out != os.Stdout) {
+    out.Close()
+  }
+}
+
+func main() {
+  fmt.Printf("max int: %d", MAX_INT)
+  log.SetFlags(log.LstdFlags | log.Lshortfile)
+
+  inplace := false
+  inplace_many := false
+  with_filename := false
+  help := false
+  debug := false
+
+  flag.BoolVar(&help, "help", false, "print help")
+  flag.BoolVar(&inplace, "i", false, "perform replacement on one file in-place")
+  flag.BoolVar(&inplace_many, "I", false, "perform replacement on multiple files in-place")
+  flag.BoolVar(&with_filename, "H", false, "prefix matches with file name")
+  flag.BoolVar(&debug, "d", false, "enable debug output")
+  flag.Parse()
+
+  args := flag.Args()
+
+  if len(args) <= 0 || help {
+    print_help()
+  }
+
+  inplace = inplace || inplace_many
+  if (!debug) {
+    log.SetOutput(new(NullWriter))
+  }
+
+  re := regexp.MustCompile(args[0])
+  replacement, files := parse_file_args(args[1:])
+  log.Printf("Number of files: %d", len(files))
+
+  if replacement != nil {
+    log.Printf("Replacement string: %s", *replacement)
+  }
+
+  if len(files) == 0 {
+    grope(re, replacement, inplace, os.Stdin.Name(), with_filename, func() ([]byte, error) {
+      return ioutil.ReadAll(os.Stdin)
+    })
+  } else {
+    if len(files) > 1 && inplace && !inplace_many {
+      fail("Operating on multiple files but -I option not specified", BAD_INPLACE_FLAG)
+    }
+    for _, file := range files {
+      grope(re, replacement, inplace, file, with_filename, func() ([]byte, error) {
+        return ioutil.ReadFile(file)
+      })
+    }
+  }
 }
