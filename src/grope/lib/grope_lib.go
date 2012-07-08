@@ -119,7 +119,6 @@ func grope(re *regexp.Regexp, replacement *string, inplace bool, file string, wi
 }
 
 func Main() {
-  fmt.Printf("max int: %d", MAX_INT)
   log.SetFlags(log.LstdFlags | log.Lshortfile)
 
   inplace := false
