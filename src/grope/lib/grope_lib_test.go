@@ -1,4 +1,4 @@
-package grope
+package lib
 
 import "testing"
 import "os"
@@ -17,7 +17,7 @@ func TestMissingIsNotFile(test *testing.T) {
 }
 
 func TestParseValidFileArgs(test *testing.T) {
-  args := []string{"../../test/test1.txt", "../../test/test2.txt"}
+  args := []string{"../../../test/test1.txt", "../../../test/test2.txt"}
   replacement, files := parse_file_args(args)
   if replacement != nil {
     test.Error("first file interpreted as replacement string")
@@ -30,7 +30,7 @@ func TestParseValidFileArgs(test *testing.T) {
 }
 
 func TestParseFileArgsWithReplacement(test *testing.T) {
-  args := []string{"abcd", "../../test/test2.txt"}
+  args := []string{"abcd", "../../../test/test2.txt"}
   replacement, files := parse_file_args(args)
   if replacement == nil || *replacement != "abcd" {
     test.Error("first file not interpreted as replacement string")

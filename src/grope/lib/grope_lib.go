@@ -1,4 +1,4 @@
-package grope
+package lib
 
 import (
   "flag"
