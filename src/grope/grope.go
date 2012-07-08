@@ -1,4 +1,4 @@
-package main
+package grope
 
 import (
   "flag"
@@ -6,7 +6,6 @@ import (
   "regexp"
   "os"
   "path"
-  //"syscall"
   "io/ioutil"
   "log"
 )
@@ -119,7 +118,7 @@ func grope(re *regexp.Regexp, replacement *string, inplace bool, file string, wi
   }
 }
 
-func main() {
+func Main() {
   fmt.Printf("max int: %d", MAX_INT)
   log.SetFlags(log.LstdFlags | log.Lshortfile)
 
