@@ -17,19 +17,151 @@ const BAD_INPLACE_FLAG = 3
 const BAD_TEMPLATE_FLAG = 4
 
 const MAX_INT = int(^uint(0) >> 1)
+const LOG_FLAGS = log.LstdFlags | log.Lshortfile
 
 type NullWriter struct {}
 func (w *NullWriter) Write(data []byte) (int, error) { return len(data), nil }
 
-type read_file func() ([]byte, error)
+type ReadFunc func() ([]byte, error)
 
-func print_help() {
-  program := path.Base(os.Args[0])
-  fmt.Fprintf(os.Stderr, "Usage: %s [-d] [-i|-I] <regex> [replacement] [file file file]\n", program)
-  fmt.Fprintf(os.Stderr, "       %s --help\n", program)
-  flag.PrintDefaults()
+type Grope struct {
+  program string
+  inplace,
+  inplace_many,
+  with_filename,
+  template,
+  help,
+  debug bool
+  log *log.Logger
+  flagSet *flag.FlagSet
+  re *regexp.Regexp
+  replacement *string
+  files []string
+}
+
+func New(program string) *Grope {
+  grope := Grope{}
+  grope.program = path.Base(program)
+  grope.log = log.New(new(NullWriter), "", LOG_FLAGS)
+  grope.flagSet = flag.NewFlagSet("grope", flag.ExitOnError)
+  grope.flagSet.BoolVar(&grope.help, "help", false, "print help")
+  grope.flagSet.BoolVar(&grope.inplace, "i", false, "perform replacement on one file in-place")
+  grope.flagSet.BoolVar(&grope.inplace_many, "I", false, "perform replacement on multiple files in-place")
+  grope.flagSet.BoolVar(&grope.with_filename, "H", false, "prefix matches with file name")
+  grope.flagSet.BoolVar(&grope.template, "o", false, "expand replacement string as output template")
+  grope.flagSet.BoolVar(&grope.debug, "d", false, "enable debug output")
+  //grope.flagSet.Usage = PrintHelpAndExit
+  return &grope
+}
+
+func (grope Grope) PrintHelpAndExit() {
+  fmt.Fprintf(os.Stderr, "Usage: %s [-d] [-i|-I] <regex> [replacement] [file file file]\n", grope.program)
+  fmt.Fprintf(os.Stderr, "       %s --help\n", grope.program)
+  grope.flagSet.PrintDefaults()
   os.Exit(BAD_ARGS)
 }
+
+func (grope Grope) ParseArgs(args []string) {
+  grope.flagSet.Parse(args)
+
+  args = grope.flagSet.Args()
+
+  if len(args) <= 0 || grope.help {
+    grope.PrintHelpAndExit()
+  }
+
+  grope.inplace = grope.inplace || grope.inplace_many
+
+  if (grope.debug) {
+    grope.log = log.New(os.Stderr, "", LOG_FLAGS)
+  }
+
+  grope.re = regexp.MustCompile(args[0])
+  grope.replacement, grope.files = parse_file_args(args[1:])
+}
+
+func (grope Grope) Main(args []string) {
+  grope.ParseArgs(args)
+  grope.Exec()
+}
+
+func (grope Grope) Exec() {
+  if grope.replacement != nil {
+    grope.log.Printf("Replacement string: %s", *grope.replacement)
+  }
+
+  if grope.template && grope.replacement == nil {
+    fail("Must specify output string when using template expansion", BAD_TEMPLATE_FLAG)
+  }
+
+  if len(grope.files) == 0 {
+    grope.GropeFile(os.Stdin.Name(), func() ([]byte, error) {
+      return ioutil.ReadAll(os.Stdin)
+    })
+  } else {
+    if len(grope.files) > 1 && grope.inplace && !grope.inplace_many {
+      fail("Operating on multiple files but -I option not specified", BAD_INPLACE_FLAG)
+    }
+    for _, file := range grope.files {
+      grope.GropeFile(file, func() ([]byte, error) {
+        return ioutil.ReadFile(file)
+      })
+    }
+  }
+}
+
+func (grope Grope) GropeFile(file string, read_func ReadFunc) {
+  input, err := read_func()
+  handle_file_error(err, "Error reading file", file, INPUT_ERR)
+
+  out := os.Stdout
+
+  if grope.template {
+    grope.Expand(input, file, out)
+  } else if grope.replacement != nil {
+    out = grope.Replace(input, file, out)
+  } else {
+    grope.Find(input, file, out)
+  }
+
+  out.Sync()
+  if (out != os.Stdout) {
+    out.Close()
+  }
+}
+
+
+func (grope Grope) Replace(input []byte, file string, out *os.File) *os.File {
+  grope.log.Printf("Processing input file: %s", file)
+  if (grope.inplace) {
+    if (os.Stdin.Name() == file) {
+      os.Stderr.WriteString("Warning: not replacing Stdin in-place\n")
+    } else {
+      var err error
+      out, err = os.OpenFile(file, os.O_WRONLY, 644)
+      handle_file_error(err, "Error opening output file", file, OUTPUT_ERR)
+    }
+  }
+  write_match(out, grope.with_filename, file, grope.re.ReplaceAll(input, []byte(*grope.replacement)))
+  return out
+}
+
+func (grope Grope) Find(input []byte, file string, out *os.File) {
+  result := grope.re.FindAll(input, MAX_INT)
+  for _, match := range result {
+    write_match(out, grope.with_filename, file, match)
+  }
+}
+
+func (grope Grope) Expand(input []byte, file string, out *os.File) {
+  result := grope.re.FindAllSubmatchIndex(input, MAX_INT)
+  for _, match := range result {
+    dst := []byte{}
+    expanded := grope.re.Expand(dst, []byte(*grope.replacement), input, match)
+    write_match(out, grope.with_filename, file, expanded)
+  }
+}
+
 
 func fail(msg string, code int) {
   os.Stderr.WriteString(msg + "\n")
@@ -78,110 +210,4 @@ func write_match(out *os.File, with_filename bool, file string, match []byte) {
   }
   out.Write(match)
   out.WriteString("\n")
-}
-
-func replace(re *regexp.Regexp, input []byte, replacement *string, inplace bool, file string, with_filename bool, out *os.File) *os.File {
-  log.Printf("Processing input file: %s", file)
-  if (inplace) {
-    if (os.Stdin.Name() == file) {
-      os.Stderr.WriteString("Warning: not replacing Stdin in-place\n")
-    } else {
-      var err error
-      out, err = os.OpenFile(file, os.O_WRONLY, 644)
-      handle_file_error(err, "Error opening output file", file, OUTPUT_ERR)
-    }
-  }
-  write_match(out, with_filename, file, re.ReplaceAll(input, []byte(*replacement)))
-  return out
-}
-
-func find(re *regexp.Regexp, input []byte, file string, with_filename bool, out *os.File) {
-  result := re.FindAll(input, MAX_INT)
-  for _, match := range result {
-    write_match(out, with_filename, file, match)
-  }
-}
-
-func expand(re *regexp.Regexp, input []byte, template string, file string, with_filename bool, out *os.File) {
-  result := re.FindAllSubmatchIndex(input, MAX_INT)
-  for _, match := range result {
-    dst := []byte{}
-    expanded := re.Expand(dst, []byte(template), input, match)
-    write_match(out, with_filename, file, expanded)
-  }
-}
-
-func grope(re *regexp.Regexp, replacement *string, template bool, inplace bool, file string, with_filename bool, reader read_file) {
-  input, err := reader()
-  handle_file_error(err, "Error reading file", file, INPUT_ERR)
-
-  out := os.Stdout
-  if template {
-    expand(re, input, *replacement, file, with_filename, out)
-  } else if replacement != nil {
-    out = replace(re, input, replacement, inplace, file, with_filename, out)
-  } else {
-    find(re, input, file, with_filename, out)
-  }
-  out.Sync()
-  if (out != os.Stdout) {
-    out.Close()
-  }
-}
-
-func Main() {
-  log.SetFlags(log.LstdFlags | log.Lshortfile)
-
-  inplace := false
-  inplace_many := false
-  with_filename := false
-  template := false
-  help := false
-  debug := false
-
-  flag.BoolVar(&help, "help", false, "print help")
-  flag.BoolVar(&inplace, "i", false, "perform replacement on one file in-place")
-  flag.BoolVar(&inplace_many, "I", false, "perform replacement on multiple files in-place")
-  flag.BoolVar(&with_filename, "H", false, "prefix matches with file name")
-  flag.BoolVar(&template, "o", false, "expand replacement string as output template")
-  flag.BoolVar(&debug, "d", false, "enable debug output")
-  flag.Parse()
-
-  args := flag.Args()
-
-  if len(args) <= 0 || help {
-    print_help()
-  }
-
-  inplace = inplace || inplace_many
-  if (!debug) {
-    log.SetOutput(new(NullWriter))
-  }
-
-  re := regexp.MustCompile(args[0])
-  replacement, files := parse_file_args(args[1:])
-  log.Printf("Number of files: %d", len(files))
-
-  if replacement != nil {
-    log.Printf("Replacement string: %s", *replacement)
-  }
-
-  if template && replacement == nil {
-    fail("Must specify output string when using template expansion", BAD_TEMPLATE_FLAG)
-  }
-
-  if len(files) == 0 {
-    grope(re, replacement, template, inplace, os.Stdin.Name(), with_filename, func() ([]byte, error) {
-      return ioutil.ReadAll(os.Stdin)
-    })
-  } else {
-    if len(files) > 1 && inplace && !inplace_many {
-      fail("Operating on multiple files but -I option not specified", BAD_INPLACE_FLAG)
-    }
-    for _, file := range files {
-      grope(re, replacement, template, inplace, file, with_filename, func() ([]byte, error) {
-        return ioutil.ReadFile(file)
-      })
-    }
-  }
 }
