@@ -23,6 +23,9 @@ type NullWriter struct {}
 func (w *NullWriter) Write(data []byte) (int, error) { return len(data), nil }
 
 type ReadFunc func() ([]byte, error)
+type Emitter interface {
+  Emit(out *os.File, with_filename bool, file string, match []byte)
+}
 
 type Grope struct {
   program string
@@ -37,6 +40,8 @@ type Grope struct {
   re *regexp.Regexp
   replacement *string
   files []string
+  default_out *os.File
+  emitter Emitter
 }
 
 func New(program string) *Grope {
@@ -51,6 +56,8 @@ func New(program string) *Grope {
   grope.flagSet.BoolVar(&grope.template, "o", false, "expand replacement string as output template")
   grope.flagSet.BoolVar(&grope.debug, "d", false, "enable debug output")
   //grope.flagSet.Usage = PrintHelpAndExit
+  grope.default_out = os.Stdout
+  grope.emitter = &grope
   return &grope
 }
 
@@ -115,7 +122,7 @@ func (grope *Grope) GropeFile(file string, read_func ReadFunc) {
   input, err := read_func()
   handle_file_error(err, "Error reading file", file, INPUT_ERR)
 
-  out := os.Stdout
+  out := grope.default_out
 
   if grope.template {
     grope.Expand(input, file, out)
@@ -131,7 +138,6 @@ func (grope *Grope) GropeFile(file string, read_func ReadFunc) {
   }
 }
 
-
 func (grope *Grope) Replace(input []byte, file string, out *os.File) *os.File {
   grope.log.Printf("Processing input file: %s", file)
   if (grope.inplace) {
@@ -143,14 +149,15 @@ func (grope *Grope) Replace(input []byte, file string, out *os.File) *os.File {
       handle_file_error(err, "Error opening output file", file, OUTPUT_ERR)
     }
   }
-  write_match(out, grope.with_filename, file, grope.re.ReplaceAll(input, []byte(*grope.replacement)))
+  replaced := grope.re.ReplaceAll(input, []byte(*grope.replacement))
+  grope.emitter.Emit(out, grope.with_filename, file, replaced)
   return out
 }
 
 func (grope *Grope) Find(input []byte, file string, out *os.File) {
   result := grope.re.FindAll(input, MAX_INT)
   for _, match := range result {
-    write_match(out, grope.with_filename, file, match)
+    grope.emitter.Emit(out, grope.with_filename, file, match)
   }
 }
 
@@ -160,18 +167,25 @@ func (grope *Grope) Expand(input []byte, file string, out *os.File) {
     for _, match := range result {
       dst := []byte{}
       expanded := grope.re.Expand(dst, []byte(*grope.replacement), input, match)
-      write_match(out, grope.with_filename, file, expanded)
+      grope.emitter.Emit(out, grope.with_filename, file, expanded)
     }
   } else {
     result := grope.re.FindAllSubmatch(input, MAX_INT)
     for _, match := range result {
       for _, submatch := range match[1:] {
-        write_match(out, grope.with_filename, file, submatch)
+        grope.emitter.Emit(out, grope.with_filename, file, submatch)
       }
     }
   }
 }
 
+func (grope *Grope) Emit(out *os.File, with_filename bool, file string, match []byte) {
+  if with_filename {
+    out.WriteString(file + ": ")
+  }
+  out.Write(match)
+  out.WriteString("\n")
+}
 
 func fail(msg string, code int) {
   os.Stderr.WriteString(msg + "\n")
@@ -214,10 +228,4 @@ func (grope *Grope) parseFileArgs(args []string) (replacement *string, files []s
   return
 }
 
-func write_match(out *os.File, with_filename bool, file string, match []byte) {
-  if with_filename {
-    out.WriteString(file + ": ")
-  }
-  out.Write(match)
-  out.WriteString("\n")
-}
+
