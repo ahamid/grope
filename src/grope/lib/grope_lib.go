@@ -95,10 +95,6 @@ func (grope *Grope) Exec() {
     grope.log.Printf("Replacement string: %s", *grope.replacement)
   }
 
-  if grope.template && grope.replacement == nil {
-    fail("Must specify output string when using template expansion", BAD_TEMPLATE_FLAG)
-  }
-
   if len(grope.files) == 0 {
     grope.GropeFile(os.Stdin.Name(), func() ([]byte, error) {
       return ioutil.ReadAll(os.Stdin)
@@ -159,11 +155,20 @@ func (grope *Grope) Find(input []byte, file string, out *os.File) {
 }
 
 func (grope *Grope) Expand(input []byte, file string, out *os.File) {
-  result := grope.re.FindAllSubmatchIndex(input, MAX_INT)
-  for _, match := range result {
-    dst := []byte{}
-    expanded := grope.re.Expand(dst, []byte(*grope.replacement), input, match)
-    write_match(out, grope.with_filename, file, expanded)
+  if (grope.replacement != nil) {
+    result := grope.re.FindAllSubmatchIndex(input, MAX_INT)
+    for _, match := range result {
+      dst := []byte{}
+      expanded := grope.re.Expand(dst, []byte(*grope.replacement), input, match)
+      write_match(out, grope.with_filename, file, expanded)
+    }
+  } else {
+    result := grope.re.FindAllSubmatch(input, MAX_INT)
+    for _, match := range result {
+      for _, submatch := range match[1:] {
+        write_match(out, grope.with_filename, file, submatch)
+      }
+    }
   }
 }
 
